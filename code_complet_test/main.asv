@@ -1,0 +1,143 @@
+%% two files of 5 sensors each corresponding to differents shoes same speed
+
+clear; clc; close all;
+
+%% 1. EXPERIMENT PARAMETERS
+
+fs   = 120;          % Sampling frequency [Hz]
+ts   = 1/fs;         % Sampling period [s]
+nSensors = 10;       % Number of accelerometers (expected)
+ndim = 5;            % Number of dimensions (X,Y,Z,semi-modulus, modulus) 
+
+% we still call them A1..A5 for reference only
+sensorNames = {'A1','A2','A3','A4','A5'};
+
+% use Z axis only
+axisLabels = {'Acc_X','Acc_Y','Acc_Z'};
+xAxisIndex = 1;      % use Acc_X
+yAxisIndex = 2;      % use Acc_Y
+zAxisIndex = 3;      % use Acc_Z
+
+% what do we want to see
+axisLabelsfig = {'Acc_X','Acc_Y','Acc_Z','semi_modulus','modulus'};
+axisshow = 4; % choice
+
+%% 2. LOAD CSV FILES (USER SELECTS 10 FILES) AND BUILD DATASET
+% dataAll will have size: [N x 5 x 10]
+
+[fileNames, pathName] = uigetfile('*.csv', ... 
+    'Select CSV files', 'MultiSelect', 'on');   %% need to select from 1 to 5 and from new to old
+
+if isequal(fileNames,0)
+    error('No files selected.');
+end
+
+% handle single vs multiple selection
+if ischar(fileNames)
+    fileNames = {fileNames};
+end
+
+if numel(fileNames) ~= nSensors
+    error('You must select exactly %d CSV files. Selected: %d.', ...
+        nSensors, numel(fileNames));
+end
+
+rawData = cell(nSensors,1);
+
+for i = 1:nSensors
+    filePath = fullfile(pathName, fileNames{i});
+    fprintf('Reading file: %s\n', filePath);
+    
+    T = readtable(filePath);
+    
+    % check required columns
+    if ~all(ismember({'Acc_X','Acc_Y','Acc_Z'}, T.Properties.VariableNames))
+        error('File %s does not contain Acc_X, Acc_Y, Acc_Z columns.', fileNames{i});
+    end
+    
+    aS = [ T.Acc_X, T.Acc_Y, T.Acc_Z ];   % [N x 3] %acc_Sensors
+
+    % Euler angles (assumed: Euler_X = roll, Euler_Y = pitch, Euler_Z = yaw) [deg]
+    rollDeg  = T.Euler_X;
+    pitchDeg = T.Euler_Y;
+    yawDeg   = T.Euler_Z;
+
+    roll  = deg2rad(rollDeg);   % phi
+    pitch = deg2rad(pitchDeg);  % theta
+    yaw   = deg2rad(yawDeg);    % psi
+    
+    [aLx, aLy, aLz,] = rotateToGlobal(aS, roll, pitch, yaw);
+    
+    rawData{i} = [aLx, aLy, aLz];  % Store the rotated accelerometer data
+end
+
+% Use the minimum length among sensors
+minLen = min(cellfun(@(x) size(x,1), rawData));
+
+% Build dataset: dataAll(time, axis, sensor)
+dataAll = zeros(minLen, 3, nSensors);
+
+for i = 1:nSensors
+    dataAll(:,:,i) = rawData{i}(1:minLen,:);
+end
+dataAll(:,4,:) = sqrt(dataAll(:,1,:).^2 + dataAll(:,2,:).^2 ); % module axial
+dataAll(:,5,:) = sqrt(dataAll(:,1,:).^2 + dataAll(:,2,:).^2 + dataAll(:,3,:).^2);
+N = minLen;
+t = (0:N-1)' * ts;
+
+%% 3. SELECTION OF THE DESIRED DATA
+disp('--- Sensor selection ---');
+sensor_used = input('Select sensor (1/2/3/4/5): ');
+
+disp('--- Signal selection ---');
+disp('1 = Acc_X');
+disp('2 = Acc_Y');
+disp('3 = Acc_Z');
+disp('4 = Mod_XY');
+disp('5 = Mod');
+signal_nb = input('Select mode (1/2/3/4/5): ');
+
+y_new = dataAll(:,signal_nb,sensor_used);
+y_old = dataAll(:,signal_nb,sensor_used + 5);
+
+%% 4. PLOT RAW TIME-DOMAIN SIGNALS
+
+figure;
+hold on;
+plot(t, y_new);
+plot(t, y_old);
+hold off;
+xlabel('Time [s]');
+ylabel(axisLabelsfig{axisshow});
+title(sprintf('Raw acceleration signals for sensor %d',sensor_used));
+legend('new','old');
+grid on;
+
+%% 5.Select time window
+
+[te, ~ ,ind_in, ind_fi] = selectTimeWindow(t, y_new);
+
+%selection of the region of interest
+y_new = y_new(ind_in:ind_fi);
+y_old = y_old(ind_in:ind_fi);
+
+%% 6.Obtention of the first general indicators
+
+Stats_t_new = computeStatistics(y_new);
+Stats_t_old = computeStatistics(y_old);
+
+%% 7. Single Sided FFT
+
+Y_new_fft = SingleSideFft(y_new);
+Y_old_fft = SingleSideFft(y_old);
+
+Ne_c = length(Y_new_fft);
+df_c = fs/Ne ; %frequency resolution for the complete spectrum
+f_c = (0:Ne_c-1) * (fs/Ne_c); % Frequency vector for the complete spectrum
+
+%% 8. WINDOWING 
+
+disp('--- window selection ---');
+n_window = input('Number of windows ? : ');
+
+[blocks, blockLength, N_eff] = splitSignalIntoBlocks(y_new, n_window); % N_eff = number of points effectively used
